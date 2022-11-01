@@ -360,6 +360,100 @@ class HashTable {
   }
 
   /**
+   * @brief Insert new key-value-meta tuples into the hash table.
+   * If the key already exists, the values and metas are assigned new values.
+   *
+   * If the target bucket is full, the keys with minimum meta will be
+   * overwritten by new key unless the meta of the new key is even less than
+   * minimum meta of the target bucket.
+   *
+   * @param n Number of key-value-meta tuples to inserted or assign.
+   * @param keys The keys to insert on GPU-accessible memory with shape
+   * (n).
+   * @param values The values to insert on GPU-accessible memory with
+   * shape (n, DIM).
+   * @param metas The metas to insert on GPU-accessible memory with shape
+   * (n).
+   * @parblock
+   * The metas should be a `uint64_t` value. You can specify a value that
+   * such as the timestamp of the key insertion, number of the key
+   * occurrences, or another value to perform a custom eviction strategy.
+   *
+   * The @p metas should be `nullptr`, when the LRU eviction strategy is
+   * applied.
+   * @endparblock
+   *
+   * @param evicted_keys The keys was evicted out when the buckets were full and
+   * the inserted keys have higher priority.
+   *
+   * @param evicted_values The values was evicted out when the buckets were full.
+   *
+   * @param evicted_n The number of keys were evicted out.
+   *
+   * @param stream The CUDA stream that is used to execute the operation.
+   *
+   * @param ignore_evict_strategy A boolean option indicating whether if
+   * the insert_or_assign_get_evicted ignores the evict strategy of table with current
+   * metas anyway. If true, it does not check whether the metas confroms to
+   * the evict strategy. If false, it requires the metas follow the evict
+   * strategy of table.
+   */
+  void insert_or_assign_get_evicted(size_type n,
+                                    const key_type* keys,              // (n)
+                                    const value_type* values,          // (n, DIM)
+                                    const meta_type* metas = nullptr,  // (n)
+                                    key_type* evicted_keys,  // (n)
+                                    value_type* evicted_values,  // (n, DIM)
+                                    meta_type* evicted_metas,  // (n)
+                                    size_t* evicted_n,
+                                    cudaStream_t stream = 0,
+                                    bool ignore_evict_strategy = false) {
+    if (n == 0) {
+      return;
+    }
+
+    while (!reach_max_capacity_ &&
+           fast_load_factor(n) > options_.max_load_factor) {
+      reserve(capacity() * 2);
+    }
+
+    if (!ignore_evict_strategy) {
+      check_evict_strategy(metas);
+    }
+
+    if (is_fast_mode()) {
+      const size_t block_size = 128;
+      const size_t N = n * TILE_SIZE;
+      const int grid_size = SAFE_GET_GRID_SIZE(N, block_size);
+
+      std::shared_lock<std::shared_timed_mutex> lock(mutex_, std::defer_lock);
+      if (!reach_max_capacity_) {
+        lock.lock();
+      }
+
+      if (metas == nullptr) {
+        upsert_and_evict_kernel_with_io<key_type, vector_type, meta_type, DIM, TILE_SIZE>
+            <<<grid_size, block_size, 0, stream>>>(
+                table_, keys, reinterpret_cast<const vector_type*>(values),
+                evicetd_keys, reinterpret_cast<vector_type*>(evicted_values),
+                table_->buckets, table_->buckets_size, table_->bucket_max_size,
+                table_->buckets_num, N);
+      } else {
+        upsert_and_evict_kernel_with_io<key_type, vector_type, meta_type, DIM, TILE_SIZE>
+            <<<grid_size, block_size, 0, stream>>>(
+                table_, keys, reinterpret_cast<const vector_type*>(values), metas,
+                evicted_keys, reinterpret_cast<vector_type*>(evicted_values), evicted_metas,
+                table_->buckets, table_->buckets_size,
+                table_->bucket_max_size, table_->buckets_num, N);
+      }
+    } else {
+      throw std::runtime_error("Hybrid mode is not supported when recording the evicted keys.");
+    }
+
+    CudaCheckError();
+  }
+
+  /**
    * Searches for each key in @p keys in the hash table.
    * If the key is found and the corresponding value in @p accum_or_assigns is
    * `true`, the @p vectors_or_deltas is treated as a delta to the old
