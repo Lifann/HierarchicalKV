@@ -401,7 +401,7 @@ class HashTable {
   void insert_or_assign_get_evicted(size_type n,
                                     const key_type* keys,              // (n)
                                     const value_type* values,          // (n, DIM)
-                                    const meta_type* metas = nullptr,  // (n)
+                                    const meta_type* metas,  // (n)
                                     key_type* evicted_keys,  // (n)
                                     value_type* evicted_values,  // (n, DIM)
                                     meta_type* evicted_metas,  // (n)
