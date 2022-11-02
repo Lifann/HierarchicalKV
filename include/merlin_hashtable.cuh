@@ -478,7 +478,7 @@ class HashTable {
       throw std::runtime_error("Hybrid mode is not supported when recording the evicted keys.");
     }
     CudaCheckError();
-    return count;
+    return n - count;
   }
 
   /**
