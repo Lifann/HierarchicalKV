@@ -398,18 +398,17 @@ class HashTable {
    * the evict strategy. If false, it requires the metas follow the evict
    * strategy of table.
    */
-  void insert_or_assign_get_evicted(size_type n,
-                                    const key_type* keys,              // (n)
-                                    const value_type* values,          // (n, DIM)
-                                    const meta_type* metas,  // (n)
-                                    key_type* evicted_keys,  // (n)
-                                    value_type* evicted_values,  // (n, DIM)
-                                    meta_type* evicted_metas,  // (n)
-                                    size_t* evicted_n,
-                                    cudaStream_t stream = 0,
-                                    bool ignore_evict_strategy = false) {
+  size_t insert_or_assign_get_evicted(size_type n,
+                                      const key_type* keys,              // (n)
+                                      const value_type* values,          // (n, DIM)
+                                      const meta_type* metas,  // (n)
+                                      key_type* evicted_keys,  // (n)
+                                      value_type* evicted_values,  // (n, DIM)
+                                      meta_type* evicted_metas,  // (n)
+                                      cudaStream_t stream = 0,
+                                      bool ignore_evict_strategy = false) {
     if (n == 0) {
-      return;
+      return 0;
     }
 
     while (!reach_max_capacity_ &&
@@ -420,6 +419,12 @@ class HashTable {
     if (!ignore_evict_strategy) {
       check_evict_strategy(metas);
     }
+
+    if (metas == nullptr != evicted_metas == nullptr) {
+      throw std::runtime_error("metas and evicted_metas must be both null or both existed.");
+    }
+
+    size_t count = 0;
 
     if (is_fast_mode()) {
       const size_t block_size = 128;
@@ -435,7 +440,7 @@ class HashTable {
         upsert_and_evict_kernel_with_io<key_type, vector_type, meta_type, DIM, TILE_SIZE>
             <<<grid_size, block_size, 0, stream>>>(
                 table_, keys, reinterpret_cast<const vector_type*>(values),
-                evicetd_keys, reinterpret_cast<vector_type*>(evicted_values),
+                evicted_keys, reinterpret_cast<vector_type*>(evicted_values),
                 table_->buckets, table_->buckets_size, table_->bucket_max_size,
                 table_->buckets_num, N);
       } else {
@@ -446,11 +451,34 @@ class HashTable {
                 table_->buckets, table_->buckets_size,
                 table_->bucket_max_size, table_->buckets_num, N);
       }
+#if THRUST_VERSION >= 101600
+      auto policy = thrust::cuda::par_nosync.on(stream);
+#else
+      auto policy = thrust::cuda::par.on(stream);
+#endif
+      thrust::device_ptr<K> evicted_key_it(evicted_keys);
+      thrust::device_ptr<vector_type> evicted_vec_it(reinterpret_cast<vector_type*>(evicted_values));
+      thrust::device_ptr<meta_type> evicted_meta_it(evicted_metas);
+
+      K* tmp_keys = nullptr;
+      if (metas == nullptr) {
+        // TODO: use indep kernel instead of sort 2-times.
+        CUDA_CHECK(cudaMallocAsync(&tmp_keys, n * sizeof(K), stream));
+        CUDA_CHECK(cudaMemsetAsync(tmp_keys, 0, n * sizeof(K), stream));
+        CUDA_CHECK(cudaMemcpyAsync(tmp_keys, evicted_keys, n * sizeof(K), cudaMemcpyDeviceToDevice, stream));
+        thrust::device_ptr<K> tmp_evicted_key_it(tmp_keys);
+        thrust::stable_sort_by_key(policy, tmp_evicted_key_it, tmp_evicted_key_it + n, evicted_meta_it);
+        CUDA_CHECK(cudaFreeAsync(tmp_keys, stream));
+      }
+
+      thrust::stable_sort_by_key(policy, evicted_key_it, evicted_key_it + n, evicted_vec_it);
+      count = static_cast<size_t>(thrust::count(policy, evicted_key_it, evicted_key_it + n, EMPTY_KEY));
+
     } else {
       throw std::runtime_error("Hybrid mode is not supported when recording the evicted keys.");
     }
-
     CudaCheckError();
+    return count;
   }
 
   /**
