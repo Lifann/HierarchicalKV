@@ -346,6 +346,67 @@ class HashTable {
     CudaCheckError();
   }
 
+  /*
+   * TODO: add comment
+   */
+  size_t insert_and_evict(const size_type n,
+                        const key_type* keys,              // (n)
+                        const value_type* values,          // (n, DIM)
+                        const meta_type* metas,            // (n)
+                        key_type* ev_keys,                 // (n)
+                        value_type* ev_values,             // (n, DIM)
+                        meta_type* ev_metas,               // (n)
+                        cudaStream_t stream = 0) {
+    if (n == 0) {
+      return 0;
+    }
+
+    while (!reach_max_capacity_ &&
+           fast_load_factor(n) > options_.max_load_factor) {
+      reserve(capacity() * 2);
+    }
+
+    std::shared_lock<std::shared_timed_mutex> lock(mutex_, std::defer_lock);
+    if (!reach_max_capacity_) {
+      lock.lock();
+    }
+
+    size_t n_evicted = 0;
+
+    if (is_fast_mode()) {
+      const size_t block_size = options_.block_size;
+      const size_t grid_size = SAFE_GET_GRID_SIZE(n, block_size);
+      broadcast<K><<<grid_size, block_size, 0, stream>>>(ev_keys, EMPTY_KEY, n);
+
+      using Selector =
+          SelectUpsertKernelWithIO<key_type, vector_type, meta_type, DIM>;
+      static thread_local int step_counter = 0;
+      static thread_local float load_factor = 0.0;
+
+      if (((step_counter++) % kernel_select_interval_) == 0) {
+        load_factor = fast_load_factor();
+      }
+
+      Selector::execute_and_evict_kernel(
+          load_factor, options_.block_size, stream, n, d_table_, keys,
+          reinterpret_cast<const vector_type*>(values), metas, ev_keys, reinterpret_cast<vector_type*>(ev_values), ev_metas);
+
+      bool* mask = nullptr;
+      CUDA_CHECK(cudaMallocAsync(&mask, n * sizeof(bool), stream));
+      CUDA_CHECK(cudaMemsetAsync(mask, 0, n * sizeof(bool), stream));
+      key_not_empty_kernel<key_type>(ev_keys, mask, n);
+      n_evicted = boolean_mask_kv<key_type, vector_type, meta_type>(n, mask, ev_keys, ev_values, ev_metas, stream);
+      CUDA_CHECK(cudaFreeAsync(mask, stream));
+      CUDA_CHECK(cudaStreamSynchronize(stream));
+    } else {
+      // TODO
+      throw std::logic_error("Not implemented fast_mode is disabled.");
+    }
+
+    CudaCheckError();
+    return n_evicted;
+  }
+
   /**
    * Searches for each key in @p keys in the hash table.
    * If the key is found and the corresponding value in @p accum_or_assigns is

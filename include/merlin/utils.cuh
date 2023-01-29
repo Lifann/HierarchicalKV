@@ -332,6 +332,14 @@ __forceinline__ __device__ void unlock(
   }
 }
 
+template <typename T>
+__global__ void broadcast(T* ptr, const T val, size_t n) {
+  size_t idx = static_cast<size_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (idx < n) {
+    ptr[idx] = val;
+  }
+}
+
 inline void free_pointers(cudaStream_t stream, int n, ...) {
   va_list args;
   va_start(args, n);
