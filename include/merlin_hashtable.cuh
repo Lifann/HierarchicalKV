@@ -394,7 +394,7 @@ class HashTable {
       bool* mask = nullptr;
       CUDA_CHECK(cudaMallocAsync(&mask, n * sizeof(bool), stream));
       CUDA_CHECK(cudaMemsetAsync(mask, 0, n * sizeof(bool), stream));
-      key_not_empty_kernel<key_type>(ev_keys, mask, n);
+      key_not_empty_kernel<key_type><<<grid_size, block_size, 0, stream>>>(ev_keys, mask, n);
       n_evicted = boolean_mask_kv<key_type, vector_type, meta_type>(n, mask, ev_keys, ev_values, ev_metas, stream);
       CUDA_CHECK(cudaFreeAsync(mask, stream));
       CUDA_CHECK(cudaStreamSynchronize(stream));
